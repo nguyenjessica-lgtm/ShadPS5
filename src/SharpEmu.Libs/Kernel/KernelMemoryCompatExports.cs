@@ -5855,7 +5855,7 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
-        if (!TryReadHostMemory(address, destination))
+        if (!TryReadTrackedLibcHeap(address, destination) && !TryReadHostMemory(address, destination))
         {
             return false;
         }
@@ -5921,7 +5921,7 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
-        if (!TryWriteHostMemory(address, source))
+        if (!TryWriteTrackedLibcHeap(address, source) && !TryWriteHostMemory(address, source))
         {
             return false;
         }
@@ -6663,7 +6663,7 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    internal static bool TryReadTrackedLibcHeap(
+    internal static unsafe bool TryReadTrackedLibcHeap(
         ulong address,
         Span<byte> destination)
     {
@@ -6687,7 +6687,54 @@ public static partial class KernelMemoryCompatExports
                     continue;
                 }
 
-                return TryReadHostMemory(address, destination);
+                try
+                {
+                    // Marshal.AllocHGlobal allocations are not present in the
+                    // emulator's POSIX HostMemory map, so TryReadHostMemory
+                    // would reject this already-bounds-checked range.
+                    new ReadOnlySpan<byte>((void*)address, destination.Length).CopyTo(destination);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static unsafe bool TryWriteTrackedLibcHeap(ulong address, ReadOnlySpan<byte> source)
+    {
+        if (source.IsEmpty)
+        {
+            return true;
+        }
+
+        var length = (ulong)source.Length;
+        lock (_libcAllocGate)
+        {
+            foreach (var (allocationAddress, allocation) in _libcAllocations)
+            {
+                var allocationSize = (ulong)allocation.Size;
+                var offset = address >= allocationAddress
+                    ? address - allocationAddress
+                    : ulong.MaxValue;
+                if (offset > allocationSize || length > allocationSize - offset)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    source.CopyTo(new Span<byte>((void*)address, source.Length));
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
             }
         }
 
